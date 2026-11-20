@@ -37,6 +37,16 @@ export class ServiceRepository extends BaseRepository {
     return this.execute((collection) => collection.findOne({ _id: objectId }));
   }
 
+  async findPublicById(id) {
+    const objectId = this.toObjectId(id, 'service id');
+
+    return this.execute((collection) =>
+      collection
+        .findOne({ _id: objectId, ...PUBLIC_SERVICE_FILTER })
+        .then((document) => this.requireFound(document))
+    );
+  }
+
   async create(data) {
     const service = this.parseOrThrow(
       serviceSchema,
@@ -97,6 +107,7 @@ export class ServiceRepository extends BaseRepository {
       const pattern = this.escapeRegex(normalized.search);
       filter.$or = [
         { title: { $regex: pattern, $options: 'i' } },
+        { category: { $regex: pattern, $options: 'i' } },
         { description: { $regex: pattern, $options: 'i' } }
       ];
     }

@@ -18,6 +18,14 @@ const SAFE_USER_PROJECTION = Object.freeze({
   verificationToken: 0
 });
 
+const PUBLIC_TECHNICIAN_PROJECTION = Object.freeze({
+  _id: 0,
+  name: 1,
+  image: 1,
+  area: 1,
+  bio: 1
+});
+
 export class UserRepository extends BaseRepository {
   constructor(options) {
     super('users', {
@@ -43,6 +51,17 @@ export class UserRepository extends BaseRepository {
       collection.findOne(
         { email: normalizedEmail },
         { projection: this.projection }
+      )
+    );
+  }
+
+  async findPublicTechnicianByEmail(email) {
+    const normalizedEmail = this.normalizeEmail(email);
+
+    return this.execute((collection) =>
+      collection.findOne(
+        { email: normalizedEmail },
+        { projection: PUBLIC_TECHNICIAN_PROJECTION }
       )
     );
   }
