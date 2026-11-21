@@ -35,6 +35,15 @@ export const ALLOWED_BOOKING_STATUS_TRANSITIONS = Object.freeze({
   cancelled: Object.freeze([])
 });
 
+export const TECHNICIAN_ALLOWED_BOOKING_STATUS_TRANSITIONS = Object.freeze({
+  requested: Object.freeze(['accepted', 'rejected']),
+  accepted: Object.freeze(['in-progress']),
+  'in-progress': Object.freeze(['completed']),
+  completed: Object.freeze([]),
+  rejected: Object.freeze([]),
+  cancelled: Object.freeze([])
+});
+
 const isTodayOrFuture = (value) => {
   const selected = new Date(`${value}T00:00:00.000Z`);
   const now = new Date();
@@ -43,6 +52,22 @@ const isTodayOrFuture = (value) => {
   );
   return selected >= today;
 };
+
+export const bookingCreateInputSchema = z
+  .object({
+    serviceId: objectIdSchema,
+    customerPhone: requiredString('Customer phone'),
+    address: requiredString('Address'),
+    preferredDate: dateOnlySchema.refine(
+      isTodayOrFuture,
+      'Preferred date cannot be in the past.'
+    ),
+    problemDescription: z
+      .string()
+      .trim()
+      .min(20, 'Problem description must be at least 20 characters.')
+  })
+  .strict();
 
 export const bookingSchema = z
   .object({
