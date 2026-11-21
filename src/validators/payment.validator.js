@@ -9,10 +9,24 @@ import {
 
 export const PAYMENT_CURRENCIES = Object.freeze(['usd']);
 export const PAYMENT_STATUSES = Object.freeze(['paid']);
+const STRIPE_SESSION_ID_PATTERN = /^cs_(?:test|live)_[A-Za-z0-9_]+$/;
 
 export const paidPaymentStatusSchema = z.literal('paid');
-export const stripeSessionIdSchema = requiredString('Stripe session ID');
+export const stripeSessionIdSchema = z
+  .string()
+  .max(255, 'Stripe session ID is too long.')
+  .regex(STRIPE_SESSION_ID_PATTERN, 'Invalid Stripe session ID.');
 export const transactionIdSchema = requiredString('Transaction ID');
+export const checkoutSessionInputSchema = z
+  .object({
+    bookingId: objectIdSchema
+  })
+  .strict();
+export const paymentVerificationQuerySchema = z
+  .object({
+    session_id: stripeSessionIdSchema
+  })
+  .strict();
 
 export const paymentSchema = z.object({
   _id: objectIdSchema.optional(),
