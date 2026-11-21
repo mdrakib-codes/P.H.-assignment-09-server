@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { ObjectId } from 'mongodb';
 import { test } from 'node:test';
 import {
+  bookingCreateInputSchema,
   bookingSchema,
+  dateOnlySchema,
   objectIdSchema,
   paymentSchema,
   publicRoleSchema,
   serviceSchema,
+  stripeSessionIdSchema,
   userSchema
 } from '../src/validators/index.js';
 
@@ -49,6 +52,13 @@ const baseBooking = {
   problemDescription: 'The screen is cracked and the touch panel is unresponsive.'
 };
 
+const baseBookingInput = {
+  serviceId: objectId,
+  customerPhone: '555-1000',
+  address: '12 Main Street',
+  problemDescription: 'The screen is cracked and the touch panel is unresponsive.'
+};
+
 const basePayment = {
   bookingId: objectId,
   serviceTitle: 'Phone screen repair',
@@ -80,6 +90,38 @@ test('objectId schema accepts ObjectId instances and 24-character hex strings', 
   assert.throws(() => objectIdSchema.parse('not-an-object-id'));
 });
 
+test('dateOnlySchema accepts real calendar dates and rejects impossible dates', () => {
+  assert.equal(dateOnlySchema.parse('2024-02-29'), '2024-02-29');
+
+  for (const invalid of [
+    '2026-02-30',
+    '2027-02-30',
+    '2026-04-31',
+    '2026-13-01',
+    '2026-00-10',
+    '2026-01-00'
+  ]) {
+    assert.throws(() => dateOnlySchema.parse(invalid), /Invalid calendar date|YYYY-MM-DD/);
+  }
+});
+
+test('booking input rejects impossible and past preferred dates', () => {
+  const today = new Date().toISOString().slice(0, 10);
+
+  assert.equal(
+    bookingCreateInputSchema.parse({ ...baseBookingInput, preferredDate: today }).preferredDate,
+    today
+  );
+  assert.throws(
+    () => bookingCreateInputSchema.parse({ ...baseBookingInput, preferredDate: '2027-02-30' }),
+    /Invalid calendar date/
+  );
+  assert.throws(
+    () => bookingCreateInputSchema.parse({ ...baseBookingInput, preferredDate: yesterday }),
+    /cannot be in the past/
+  );
+});
+
 test('service schema applies defaults, normalizes email, and enforces enums', () => {
   const service = serviceSchema.parse(baseService);
   assert.equal(service.approvalStatus, 'pending');
@@ -100,6 +142,9 @@ test('booking schema applies defaults, derives finalAmount, and validates rules'
     bookingSchema.parse({ ...baseBooking, preferredDate: yesterday })
   );
   assert.throws(() =>
+    bookingSchema.parse({ ...baseBooking, preferredDate: '2027-02-30' })
+  );
+  assert.throws(() =>
     bookingSchema.parse({ ...baseBooking, problemDescription: 'too short' })
   );
 });
@@ -116,4 +161,22 @@ test('payment schema applies defaults and enforces payment constraints', () => {
   assert.throws(() => paymentSchema.parse({ ...basePayment, currency: 'eur' }));
   assert.throws(() => paymentSchema.parse({ ...basePayment, amount: 0 }));
   assert.throws(() => paymentSchema.parse({ ...basePayment, bookingId: 'invalid' }));
+});
+
+test('Stripe session ID schema accepts test and live IDs but rejects malformed values', () => {
+  assert.equal(stripeSessionIdSchema.parse('cs_test_ABC123'), 'cs_test_ABC123');
+  assert.equal(stripeSessionIdSchema.parse('cs_live_ABC123'), 'cs_live_ABC123');
+
+  for (const invalid of [
+    '',
+    '  cs_test_ABC123',
+    'cs_test_ABC123  ',
+    'cs_test_ABC 123',
+    `cs_test_${'a'.repeat(300)}`,
+    'cs_sandbox_ABC123',
+    'cs_test_',
+    'pi_test_ABC123'
+  ]) {
+    assert.throws(() => stripeSessionIdSchema.parse(invalid));
+  }
 });

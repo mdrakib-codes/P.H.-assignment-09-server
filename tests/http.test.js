@@ -14,15 +14,27 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-test('health endpoint reports server ok and database disconnected without a connection', async () => {
-  const response = await fetch(`${baseUrl}/api/health`);
+test('liveness endpoint reports the process is alive without a database check', async () => {
+  const response = await fetch(`${baseUrl}/api/health/live`);
   const body = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(body.success, true);
   assert.equal(body.status, 'ok');
-  assert.equal(body.database, 'disconnected');
+  assert.equal(body.database, undefined);
   assert.ok(body.timestamp);
+});
+
+test('readiness endpoint reports unavailable when the database is disconnected', async () => {
+  const response = await fetch(`${baseUrl}/api/health`);
+  const body = await response.json();
+
+  assert.equal(response.status, 503);
+  assert.equal(body.success, false);
+  assert.equal(body.error.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(body.error.details.status, 'unavailable');
+  assert.equal(body.error.details.database, 'disconnected');
+  assert.ok(body.error.details.timestamp);
 });
 
 test('unknown route still returns centralized 404 JSON', async () => {
@@ -44,6 +56,18 @@ test('malformed JSON still returns centralized 400 JSON', async () => {
 
   assert.equal(response.status, 400);
   assert.equal(body.error.code, 'MALFORMED_JSON');
+});
+
+test('CORS accepts listed origins with trailing slashes', async () => {
+  const response = await fetch(`${baseUrl}/api/health/live`, {
+    headers: { origin: 'http://localhost:3000/' }
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(
+    response.headers.get('access-control-allow-origin') || '',
+    /^http:\/\/localhost:3000\/?$/
+  );
 });
 
 test('CORS still rejects unlisted origins', async () => {

@@ -3,35 +3,26 @@ import { env } from './src/config/env.js';
 import { closeDatabase } from './src/config/database.js';
 import { initializeDatabase } from './src/db/index.js';
 import { createServerLifecycle } from './src/server/lifecycle.js';
-import { redactSecrets } from './src/utils/redact.js';
+import { createProcessHandlers } from './src/server/processHandlers.js';
 
-const lifecycle = createServerLifecycle({
+let lifecycle;
+const handlers = createProcessHandlers({
+  getLifecycle: () => lifecycle,
+  logger: console
+});
+
+lifecycle = createServerLifecycle({
   app,
   env,
   initializeDatabase,
-  closeDatabase
+  closeDatabase,
+  onServerError: (error) => handlers.handleFatal('HTTP_SERVER_ERROR', error)
 });
 
-const handleSignal = (signal) => {
-  lifecycle
-    .shutdown(signal)
-    .then(() => process.exit(0))
-    .catch((error) => {
-      console.error(
-        `[fixmate-server] Shutdown failed: ${redactSecrets(error?.message || error)}`
-      );
-      process.exit(1);
-    });
-};
-
-process.on('SIGINT', () => handleSignal('SIGINT'));
-process.on('SIGTERM', () => handleSignal('SIGTERM'));
+handlers.install();
 
 try {
   await lifecycle.start();
 } catch (error) {
-  console.error(
-    `[fixmate-server] Startup failed: ${redactSecrets(error?.message || error)}`
-  );
-  process.exit(1);
+  await handlers.handleFatal('STARTUP_ERROR', error);
 }

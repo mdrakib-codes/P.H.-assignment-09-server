@@ -3,6 +3,29 @@ import { z } from 'zod';
 
 const PLACEHOLDER_PATTERN = /<[^>]+>|cluster\.example\.com/i;
 const ALLOWED_URI_PROTOCOLS = new Set(['mongodb:', 'mongodb+srv:']);
+const booleanFromEnvSchema = z.union([
+  z.boolean(),
+  z
+    .string()
+    .trim()
+    .regex(/^(true|false|1|0)$/i, 'Must be true or false.')
+    .transform((value) => ['true', '1'].includes(value.toLowerCase()))
+]);
+
+const isValidOrigin = (origin) => {
+  try {
+    const parsed = new URL(origin);
+    return (
+      ['http:', 'https:'].includes(parsed.protocol) &&
+      parsed.hostname.length > 0 &&
+      (parsed.pathname === '/' || parsed.pathname === '') &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+};
 
 const envSchema = z
   .object({
@@ -11,34 +34,52 @@ const envSchema = z
     CLIENT_ORIGIN: z.string().trim().optional(),
     CLIENT_ORIGINS: z.string().trim().optional(),
     MONGODB_URI: z.string().trim().min(1, 'MONGODB_URI is required.'),
-    MONGODB_DNS_SERVERS: z.string().trim().optional()
+    MONGODB_DNS_SERVERS: z.string().trim().optional(),
+    STRIPE_SECRET_KEY: z.string().trim().optional(),
+    STRIPE_WEBHOOK_SECRET: z.string().trim().optional(),
+    IMGBB_API_KEY: z.string().trim().optional(),
+    TRUST_PROXY: booleanFromEnvSchema.optional(),
+    RATE_LIMIT_ENABLED: booleanFromEnvSchema.optional(),
+    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).max(3600000).default(60000),
+    RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(100000).default(600),
+    HEALTH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(100000).default(120),
+    SERVICE_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(100000).default(120),
+    WEBHOOK_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(100000).default(1000),
+    RATE_LIMIT_MAX_ENTRIES: z.coerce.number().int().min(100).max(100000).default(10000)
   })
   .superRefine((value, ctx) => {
-    const entries = [value.CLIENT_ORIGIN, value.CLIENT_ORIGINS].filter(Boolean);
-    const origins = entries.flatMap((entry) =>
-      entry
-        .split(',')
-        .map((origin) => origin.trim())
-        .filter(Boolean)
-    );
+    const hasMultiValuePrimaryOrigin = (value.CLIENT_ORIGIN || '').includes(',');
+    const primaryOrigins =
+      value.CLIENT_ORIGIN && !hasMultiValuePrimaryOrigin ? [value.CLIENT_ORIGIN] : [];
+    const additionalOrigins = (value.CLIENT_ORIGINS || '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
+    const origins = [...primaryOrigins, ...additionalOrigins];
 
-    for (const origin of origins) {
-      try {
-        const parsed = new URL(origin);
-        const isValid =
-          ['http:', 'https:'].includes(parsed.protocol) &&
-          parsed.hostname.length > 0 &&
-          (parsed.pathname === '/' || parsed.pathname === '') &&
-          !parsed.search &&
-          !parsed.hash;
+    if (hasMultiValuePrimaryOrigin) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CLIENT_ORIGIN'],
+        message: 'CLIENT_ORIGIN must contain exactly one origin; use CLIENT_ORIGINS for additional origins.'
+      });
+    }
 
-        if (!isValid) {
-          throw new Error('invalid origin');
-        }
-      } catch {
+    for (const origin of primaryOrigins) {
+      if (!isValidOrigin(origin)) {
         ctx.addIssue({
           code: 'custom',
-          path: [origin === value.CLIENT_ORIGIN ? 'CLIENT_ORIGIN' : 'CLIENT_ORIGINS'],
+          path: ['CLIENT_ORIGIN'],
+          message: `Invalid CORS origin: ${origin}`
+        });
+      }
+    }
+
+    for (const origin of additionalOrigins) {
+      if (!isValidOrigin(origin)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['CLIENT_ORIGINS'],
           message: `Invalid CORS origin: ${origin}`
         });
       }
@@ -49,6 +90,30 @@ const envSchema = z
         code: 'custom',
         path: ['CLIENT_ORIGIN'],
         message: 'CLIENT_ORIGIN or CLIENT_ORIGINS is required in production.'
+      });
+    }
+
+    if (value.NODE_ENV === 'production' && !value.STRIPE_SECRET_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STRIPE_SECRET_KEY'],
+        message: 'STRIPE_SECRET_KEY is required in production.'
+      });
+    }
+
+    if (value.NODE_ENV === 'production' && !value.STRIPE_WEBHOOK_SECRET) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STRIPE_WEBHOOK_SECRET'],
+        message: 'STRIPE_WEBHOOK_SECRET is required in production.'
+      });
+    }
+
+    if (value.IMGBB_API_KEY && /<[^>]+>|replace[_-]?me/i.test(value.IMGBB_API_KEY)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['IMGBB_API_KEY'],
+        message: 'Replace the IMGBB_API_KEY placeholder with a real server-side key.'
       });
     }
 

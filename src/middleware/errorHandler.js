@@ -1,9 +1,13 @@
 import { sendError } from '../utils/apiResponse.js';
-import { redactSecrets } from '../utils/redact.js';
+import { AppError } from '../utils/AppError.js';
+import { redactSecrets, redactUrl } from '../utils/redact.js';
 
 const isJsonParseError = (error) =>
   error?.type === 'entity.parse.failed' ||
   (error instanceof SyntaxError && 'body' in error);
+
+const isZodError = (error) =>
+  error?.name === 'ZodError' && typeof error.flatten === 'function';
 
 export const errorHandler = (error, req, res, next) => {
   if (res.headersSent) {
@@ -29,16 +33,23 @@ export const errorHandler = (error, req, res, next) => {
     code = 'PAYLOAD_TOO_LARGE';
     message = 'Request payload is too large.';
     details = undefined;
-  } else if (error?.name === 'ZodError' && typeof error.flatten === 'function') {
+  } else if (isZodError(error)) {
     statusCode = 422;
     code = 'VALIDATION_ERROR';
     message = 'Request validation failed.';
     details = error.flatten();
+  } else if (!(error instanceof AppError)) {
+    code = statusCode >= 500 ? 'INTERNAL_SERVER_ERROR' : 'REQUEST_ERROR';
+    message =
+      statusCode >= 500
+        ? 'Something went wrong.'
+        : 'Request could not be completed.';
+    details = undefined;
   }
 
   if (statusCode >= 500) {
     console.error(
-      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`,
+      `[${new Date().toISOString()}] ${req.method} ${redactUrl(req.originalUrl)}`,
       redactSecrets(error?.message || 'Unknown error')
     );
     if (error?.stack) {
