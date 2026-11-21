@@ -58,3 +58,28 @@ export const serviceUpdateSchema = z
     serviceArea: requiredString('Service area').optional()
   })
   .strict();
+
+export const serviceCreateInputSchema = z
+  .object({
+    title: requiredString('Title'),
+    category: serviceCategorySchema,
+    description: requiredString('Description'),
+    image: urlSchema,
+    basePrice: positiveMoneySchema,
+    estimatedDuration: requiredString('Estimated duration'),
+    serviceMode: serviceModeSchema,
+    serviceArea: requiredString('Service area')
+  })
+  .strict();
+
+export const serviceAvailabilityUpdateSchema = z
+  .object({
+    isAvailable: availabilitySchema
+  })
+  .strict();
+
+export const serviceApprovalUpdateSchema = z
+  .object({
+    approvalStatus: approvalDecisionSchema
+  })
+  .strict();

@@ -440,6 +440,38 @@ test('private technician information is not exposed', async () => {
   }
 });
 
+test('public service allowlist drops unknown and internal fields from list and detail', async () => {
+  const service = makeService({
+    technicianEmail: 'hidden-technician@example.com',
+    internalNote: 'do-not-leak',
+    passwordHash: 'service-password-hash',
+    tokens: ['service-token']
+  });
+  const baseUrl = await startServer({ services: [service], users: [] });
+
+  const listResponse = await fetch(baseUrl);
+  const listBody = await listResponse.json();
+  const detailResponse = await fetch(`${baseUrl}/${service._id.toHexString()}`);
+  const detailBody = await detailResponse.json();
+
+  for (const output of [
+    JSON.stringify(listBody),
+    JSON.stringify(detailBody)
+  ]) {
+    for (const secret of [
+      'hidden-technician@example.com',
+      'do-not-leak',
+      'service-password-hash',
+      'service-token'
+    ]) {
+      assert.doesNotMatch(output, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    }
+  }
+
+  assert.equal(listBody.items[0].technicianEmail, undefined);
+  assert.equal(detailBody.service.technicianEmail, undefined);
+});
+
 test('success and error responses use the consistent JSON format', async () => {
   const baseUrl = await startServer({ services: [makeService()] });
 

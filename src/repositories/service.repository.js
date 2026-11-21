@@ -1,5 +1,6 @@
 import { ObjectId } from 'mongodb';
 import {
+  adminServiceQuerySchema,
   approvalDecisionSchema,
   availabilitySchema,
   paginationSchema,
@@ -9,12 +10,42 @@ import {
   serviceUpdateSchema,
   technicianServiceQuerySchema
 } from '../validators/index.js';
+import { toIncludeProjection } from '../utils/projections.js';
 import { BaseRepository } from './base.repository.js';
+
+export const PUBLIC_SERVICE_FIELDS = Object.freeze([
+  '_id',
+  'title',
+  'category',
+  'description',
+  'image',
+  'basePrice',
+  'estimatedDuration',
+  'serviceMode',
+  'serviceArea',
+  'technicianName',
+  'createdAt',
+  'updatedAt'
+]);
+export const TECHNICIAN_SERVICE_FIELDS = Object.freeze([
+  ...PUBLIC_SERVICE_FIELDS,
+  'technicianEmail',
+  'approvalStatus',
+  'isAvailable'
+]);
+export const ADMIN_SERVICE_FIELDS = TECHNICIAN_SERVICE_FIELDS;
 
 const PUBLIC_SERVICE_FILTER = Object.freeze({
   approvalStatus: 'approved',
   isAvailable: true
 });
+const PUBLIC_SERVICE_PROJECTION = Object.freeze(
+  toIncludeProjection(PUBLIC_SERVICE_FIELDS)
+);
+const SERVICE_INTERNAL_PROJECTION = Object.freeze(
+  toIncludeProjection(TECHNICIAN_SERVICE_FIELDS)
+);
+const ADMIN_SERVICE_PROJECTION = Object.freeze(toIncludeProjection(ADMIN_SERVICE_FIELDS));
 
 const SERVICE_SORTS = Object.freeze({
   newest: { createdAt: -1 },
@@ -22,10 +53,16 @@ const SERVICE_SORTS = Object.freeze({
   'price-desc': { basePrice: -1 }
 });
 
+const ADMIN_SERVICE_SORTS = Object.freeze({
+  ...SERVICE_SORTS,
+  'pending-first': { __approvalRank: 1, createdAt: -1 }
+});
+
 export class ServiceRepository extends BaseRepository {
   constructor(options) {
     super('services', {
       entityName: 'Service',
+      projection: SERVICE_INTERNAL_PROJECTION,
       immutableFields: ['technicianEmail', 'approvalStatus', 'isAvailable'],
       ...options
     });
@@ -34,15 +71,20 @@ export class ServiceRepository extends BaseRepository {
   async findById(id) {
     const objectId = this.toObjectId(id, 'service id');
 
-    return this.execute((collection) => collection.findOne({ _id: objectId }));
+    return this.execute((collection) =>
+      collection.findOne({ _id: objectId }, { projection: this.projection })
+    );
   }
 
-  async findPublicById(id) {
+  async findPublicById(id, { includeTechnicianEmail = false } = {}) {
     const objectId = this.toObjectId(id, 'service id');
+    const projection = includeTechnicianEmail
+      ? { ...PUBLIC_SERVICE_PROJECTION, technicianEmail: 1 }
+      : PUBLIC_SERVICE_PROJECTION;
 
     return this.execute((collection) =>
       collection
-        .findOne({ _id: objectId, ...PUBLIC_SERVICE_FILTER })
+        .findOne({ _id: objectId, ...PUBLIC_SERVICE_FILTER }, { projection })
         .then((document) => this.requireFound(document))
     );
   }
@@ -75,7 +117,7 @@ export class ServiceRepository extends BaseRepository {
         .findOneAndUpdate(
           { _id: objectId },
           this.buildSet({ ...clean, approvalStatus: 'pending' }),
-          { returnDocument: 'after' }
+          { returnDocument: 'after', projection: this.projection }
         )
         .then((document) => this.requireFound(document))
     );
@@ -86,7 +128,58 @@ export class ServiceRepository extends BaseRepository {
 
     return this.execute((collection) =>
       collection
-        .findOneAndDelete({ _id: objectId })
+        .findOneAndDelete({ _id: objectId }, { projection: this.projection })
+        .then((document) => this.requireFound(document))
+    );
+  }
+
+  async updateOwnedById(id, update, technicianEmail) {
+    const objectId = this.toObjectId(id, 'service id');
+    const normalizedEmail = this.normalizeEmail(technicianEmail);
+    const clean = this.validateUpdate(serviceUpdateSchema, update);
+
+    return this.execute((collection) =>
+      collection
+        .findOneAndUpdate(
+          { _id: objectId, technicianEmail: normalizedEmail },
+          this.buildSet({ ...clean, approvalStatus: 'pending' }),
+          { returnDocument: 'after', projection: this.projection }
+        )
+        .then((document) => this.requireFound(document))
+    );
+  }
+
+  async deleteOwnedById(id, technicianEmail) {
+    const objectId = this.toObjectId(id, 'service id');
+    const normalizedEmail = this.normalizeEmail(technicianEmail);
+
+    return this.execute((collection) =>
+      collection
+        .findOneAndDelete(
+          { _id: objectId, technicianEmail: normalizedEmail },
+          { projection: this.projection }
+        )
+        .then((document) => this.requireFound(document))
+    );
+  }
+
+  async updateAvailabilityOwnedById(id, isAvailable, technicianEmail) {
+    const objectId = this.toObjectId(id, 'service id');
+    const availability = this.parseOrThrow(
+      availabilitySchema,
+      isAvailable,
+      'INVALID_AVAILABILITY',
+      'Invalid availability value.'
+    );
+    const normalizedEmail = this.normalizeEmail(technicianEmail);
+
+    return this.execute((collection) =>
+      collection
+        .findOneAndUpdate(
+          { _id: objectId, technicianEmail: normalizedEmail },
+          this.buildSet({ isAvailable: availability }),
+          { returnDocument: 'after', projection: this.projection }
+        )
         .then((document) => this.requireFound(document))
     );
   }
@@ -115,7 +208,8 @@ export class ServiceRepository extends BaseRepository {
     return this.execute((collection) =>
       this.readPaginated(collection, filter, {
         query: normalized,
-        sort: SERVICE_SORTS[normalized.sort]
+        sort: SERVICE_SORTS[normalized.sort],
+        projection: PUBLIC_SERVICE_PROJECTION
       })
     );
   }
@@ -163,6 +257,61 @@ export class ServiceRepository extends BaseRepository {
     );
   }
 
+  async findAllForAdmin(query) {
+    const normalized = this.validateQuery(adminServiceQuerySchema, query);
+    const filter = {};
+
+    if (normalized.approvalStatus) {
+      filter.approvalStatus = normalized.approvalStatus;
+    }
+
+    if (normalized.category) {
+      filter.category = normalized.category;
+    }
+
+    if (normalized.serviceMode) {
+      filter.serviceMode = normalized.serviceMode;
+    }
+
+    if (normalized.search) {
+      const pattern = this.escapeRegex(normalized.search);
+      filter.$or = [
+        { title: { $regex: pattern, $options: 'i' } },
+        { category: { $regex: pattern, $options: 'i' } },
+        { description: { $regex: pattern, $options: 'i' } }
+      ];
+    }
+
+    return this.execute(async (collection) => {
+      const pipeline = [{ $match: filter }];
+
+      if (normalized.sort === 'pending-first') {
+        pipeline.push({
+          $addFields: {
+            __approvalRank: {
+              $cond: [{ $eq: ['$approvalStatus', 'pending'] }, 0, 1]
+            }
+          }
+        });
+      }
+
+      pipeline.push({ $sort: ADMIN_SERVICE_SORTS[normalized.sort] });
+      pipeline.push({ $project: ADMIN_SERVICE_PROJECTION });
+
+      pipeline.push(
+        { $skip: (normalized.page - 1) * normalized.limit },
+        { $limit: normalized.limit }
+      );
+
+      const [items, total] = await Promise.all([
+        collection.aggregate(pipeline).toArray(),
+        collection.countDocuments(filter)
+      ]);
+
+      return this.buildPagedResult(items, total, normalized);
+    });
+  }
+
   async updateApprovalStatus(id, status) {
     const objectId = this.toObjectId(id, 'service id');
     const decision = this.parseOrThrow(
@@ -177,7 +326,7 @@ export class ServiceRepository extends BaseRepository {
         .findOneAndUpdate(
           { _id: objectId },
           this.buildSet({ approvalStatus: decision }),
-          { returnDocument: 'after' }
+          { returnDocument: 'after', projection: this.projection }
         )
         .then((document) => this.requireFound(document))
     );
@@ -197,7 +346,7 @@ export class ServiceRepository extends BaseRepository {
         .findOneAndUpdate(
           { _id: objectId },
           this.buildSet({ isAvailable: availability }),
-          { returnDocument: 'after' }
+          { returnDocument: 'after', projection: this.projection }
         )
         .then((document) => this.requireFound(document))
     );
