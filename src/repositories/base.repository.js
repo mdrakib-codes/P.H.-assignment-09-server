@@ -170,15 +170,26 @@ export class BaseRepository {
     };
   }
 
-  async readPaginated(collection, filter, { query, sort = { createdAt: -1 }, projection = this.projection }) {
+  async readPaginated(
+    collection,
+    filter,
+    { query, sort = { createdAt: -1 }, projection = this.projection, collation }
+  ) {
+    const findOptions = projection ? { projection } : {};
+    const countOptions = collation ? { collation } : undefined;
+
+    if (collation) {
+      findOptions.collation = collation;
+    }
+
     const [items, total] = await Promise.all([
       collection
-        .find(filter, projection ? { projection } : {})
+        .find(filter, findOptions)
         .sort(sort)
         .skip((query.page - 1) * query.limit)
         .limit(query.limit)
         .toArray(),
-      collection.countDocuments(filter)
+      collection.countDocuments(filter, countOptions)
     ]);
 
     return this.buildPagedResult(items, total, query);

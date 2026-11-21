@@ -11,6 +11,7 @@ const {
   UserRepository,
   repositories
 } = await import('../src/repositories/index.js');
+const { CASE_INSENSITIVE_EMAIL_COLLATION } = await import('../src/db/collations.js');
 
 const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
 const objectId = new ObjectId();
@@ -129,8 +130,8 @@ const makeCollection = ({
       calls.push({ type: 'find', filter, options });
       return makeCursor(calls, documents);
     },
-    async countDocuments(filter) {
-      calls.push({ type: 'countDocuments', filter });
+    async countDocuments(filter, options) {
+      calls.push({ type: 'countDocuments', filter, options });
       return total;
     }
   };
@@ -153,7 +154,8 @@ test('repository singletons map to the four application collections', () => {
     Object.values(repositories).map((repository) => repository.collectionName),
     ['users', 'services', 'bookings', 'payments']
   );
-  assert.equal(repositories.users.projection.passwordHash, 0);
+  assert.equal(repositories.users.projection.email, 1);
+  assert.equal(repositories.users.projection.passwordHash, undefined);
 });
 
 test('invalid ObjectIds are rejected before any database access', async () => {
@@ -179,8 +181,9 @@ test('user email lookups normalize email and exclude sensitive fields', async ()
 
   assert.ok(user);
   assert.equal(collection.calls[0].filter.email, 'test.user@example.com');
-  assert.equal(collection.calls[0].options.projection.passwordHash, 0);
-  assert.equal(collection.calls[0].options.projection.tokens, 0);
+  assert.equal(collection.calls[0].options.projection.email, 1);
+  assert.equal(collection.calls[0].options.projection.passwordHash, undefined);
+  assert.equal(collection.calls[0].options.projection.tokens, undefined);
 });
 
 test('user creation normalizes email and ignores client/admin roles', async () => {
@@ -242,7 +245,8 @@ test('user listing applies role/search filters, pagination, and safe projection'
   assert.equal(result.totalPages, 3);
   assert.equal(collection.calls[0].filter.role, 'customer');
   assert.equal(collection.calls[0].filter.$or[0].name.$regex, 'a\\+b');
-  assert.equal(collection.calls[0].options.projection.passwordHash, 0);
+  assert.equal(collection.calls[0].options.projection.email, 1);
+  assert.equal(collection.calls[0].options.projection.passwordHash, undefined);
   assert.equal(collection.calls[1].value.createdAt, -1);
   assert.equal(collection.calls[2].value, 3);
   assert.equal(collection.calls[3].value, 3);
@@ -361,14 +365,50 @@ test('booking creation normalizes emails and ignores client status/amount/paymen
   assert.ok(booking.serviceId instanceof ObjectId);
 });
 
+test('booking creation maps active duplicate-key errors to a domain conflict', async () => {
+  const error = new Error('duplicate key');
+  error.code = 11000;
+  const collection = makeCollection({ insertError: error });
+  const repository = makeRepo(BookingRepository, collection);
+
+  await assert.rejects(
+    () => repository.create(baseBooking),
+    (failure) =>
+      failure.statusCode === 409 &&
+      failure.code === 'DUPLICATE_ACTIVE_BOOKING' &&
+      /active booking/i.test(failure.message)
+  );
+});
+
+test('booking creation does not translate unrelated database errors', async () => {
+  const collection = makeCollection({
+    insertError: new Error('internal detail must not escape')
+  });
+  const repository = makeRepo(BookingRepository, collection);
+
+  await assert.rejects(
+    () => repository.create(baseBooking),
+    (failure) =>
+      failure.statusCode === 500 &&
+      failure.code === 'DATABASE_ERROR' &&
+      failure.message === 'Database operation failed.'
+  );
+});
+
 test('booking status transitions follow the documented pipeline', async () => {
+  const ownerEmail = 'tech@example.com';
   const invalidCollection = makeCollection({
     findOneResult: { _id: objectId, status: 'requested' }
   });
   const invalidRepository = makeRepo(BookingRepository, invalidCollection);
 
   await assert.rejects(
-    () => invalidRepository.updateStatus(objectId, { status: 'completed' }),
+    () =>
+      invalidRepository.updateStatus(
+        objectId,
+        { status: 'completed' },
+        ownerEmail
+      ),
     (error) =>
       error.statusCode === 409 && error.code === 'INVALID_STATUS_TRANSITION'
   );
@@ -383,7 +423,11 @@ test('booking status transitions follow the documented pipeline', async () => {
 
   await assert.rejects(
     () =>
-      missingAmountRepository.updateStatus(objectId, { status: 'completed' }),
+      missingAmountRepository.updateStatus(
+        objectId,
+        { status: 'completed' },
+        ownerEmail
+      ),
     (error) =>
       error.statusCode === 400 && error.code === 'FINAL_AMOUNT_REQUIRED'
   );
@@ -394,18 +438,44 @@ test('booking status transitions follow the documented pipeline', async () => {
   });
   const repository = makeRepo(BookingRepository, collection);
 
-  await repository.updateStatus(objectId, {
-    status: 'completed',
-    finalAmount: 90
-  });
+  await repository.updateStatus(
+    objectId,
+    {
+      status: 'completed',
+      finalAmount: 90
+    },
+    ownerEmail
+  );
 
   const updateCall = collection.calls.find(
     (call) => call.type === 'findOneAndUpdate'
   );
-  assert.deepEqual(updateCall.filter, { _id: objectId, status: 'in-progress' });
+  assert.deepEqual(updateCall.filter, {
+    _id: objectId,
+    technicianEmail: ownerEmail,
+    status: 'in-progress'
+  });
   assert.equal(updateCall.update.$set.status, 'completed');
   assert.equal(updateCall.update.$set.finalAmount, 90);
   assert.ok(updateCall.update.$set.updatedAt instanceof Date);
+});
+
+test('booking status update requires a valid owner email', async () => {
+  const collection = makeCollection({
+    findOneResult: { _id: objectId, status: 'requested' }
+  });
+  const repository = makeRepo(BookingRepository, collection);
+
+  await assert.rejects(
+    () => repository.updateStatus(objectId, { status: 'accepted' }),
+    (error) => error.statusCode === 400 && error.code === 'INVALID_EMAIL'
+  );
+  await assert.rejects(
+    () => repository.updateStatus(objectId, { status: 'accepted' }, '   '),
+    (error) => error.statusCode === 400 && error.code === 'INVALID_EMAIL'
+  );
+
+  assert.equal(collection.calls.length, 0);
 });
 
 test('booking payment status update requires completed unpaid state', async () => {
@@ -452,6 +522,10 @@ test('booking filters normalize emails and support active-duplicate queries', as
     serviceId: objectId,
     status: { $in: ['requested', 'accepted', 'in-progress'] }
   });
+  assert.deepEqual(collection.calls[0].options, {
+    collation: CASE_INSENSITIVE_EMAIL_COLLATION,
+    projection: { _id: 1 }
+  });
 
   await repository.findByTechnicianEmail('  ADA@Example.COM  ', {
     status: 'accepted',
@@ -463,7 +537,48 @@ test('booking filters normalize emails and support active-duplicate queries', as
   assert.equal(findCall.filter.technicianEmail, 'ada@example.com');
   assert.equal(findCall.filter.status, 'accepted');
   assert.equal(findCall.filter.paymentStatus, 'unpaid');
+  assert.deepEqual(findCall.options.collation, CASE_INSENSITIVE_EMAIL_COLLATION);
   assert.equal(collection.calls[4].value, 2);
+});
+
+test('booking ownership updates use case-insensitive email collation', async () => {
+  const cancelCollection = makeCollection({
+    findOneResult: { _id: objectId, status: 'requested' },
+    updateResult: { _id: objectId, status: 'cancelled' }
+  });
+  const cancelRepository = makeRepo(BookingRepository, cancelCollection);
+
+  await cancelRepository.cancelById(objectId, '  Customer@Example.COM  ');
+
+  const cancelCall = cancelCollection.calls.find(
+    (call) => call.type === 'findOneAndUpdate'
+  );
+  assert.deepEqual(cancelCall.options.collation, CASE_INSENSITIVE_EMAIL_COLLATION);
+
+  const statusCollection = makeCollection({
+    findOneResult: { _id: objectId, status: 'requested' },
+    updateResult: { _id: objectId, status: 'accepted' }
+  });
+  const statusRepository = makeRepo(BookingRepository, statusCollection);
+
+  await statusRepository.updateStatus(
+    objectId,
+    { status: 'accepted' },
+    '  Tech@Example.COM  '
+  );
+
+  assert.equal(statusCollection.calls[0].type, 'findOne');
+  assert.deepEqual(
+    statusCollection.calls[0].options.collation,
+    CASE_INSENSITIVE_EMAIL_COLLATION
+  );
+  const statusUpdateCall = statusCollection.calls.find(
+    (call) => call.type === 'findOneAndUpdate'
+  );
+  assert.deepEqual(
+    statusUpdateCall.options.collation,
+    CASE_INSENSITIVE_EMAIL_COLLATION
+  );
 });
 
 test('payment creation forces paid state and maps duplicate keys', async () => {
@@ -491,11 +606,11 @@ test('payment creation forces paid state and maps duplicate keys', async () => {
   );
 });
 
-test('payment lookup methods validate identifiers and normalize session IDs', async () => {
+test('payment lookup methods validate identifiers', async () => {
   const collection = makeCollection({ findOneResult: { _id: objectId } });
   const repository = makeRepo(PaymentRepository, collection);
 
-  await repository.findByStripeSessionId('  cs_test_123  ');
+  await repository.findByStripeSessionId('cs_test_123');
   await repository.findByTransactionId('  txn_test_123  ');
   await repository.findByBookingId(objectId.toHexString());
 
@@ -504,10 +619,64 @@ test('payment lookup methods validate identifiers and normalize session IDs', as
   assert.ok(collection.calls[2].filter.bookingId instanceof ObjectId);
 
   await assert.rejects(
+    () => repository.findByStripeSessionId('  cs_test_123  '),
+    (error) =>
+      error.statusCode === 400 && error.code === 'INVALID_STRIPE_SESSION_ID'
+  );
+  await assert.rejects(
     () => repository.findByBookingId('bad-id'),
     (error) =>
       error.statusCode === 400 && error.code === 'INVALID_OBJECT_ID'
   );
+});
+
+test('payment lookups project only fields needed by safe customer responses', async () => {
+  const storedPayment = {
+    _id: objectId,
+    bookingId: objectId,
+    serviceTitle: 'Phone screen repair',
+    customerEmail: 'customer@example.com',
+    amount: 75,
+    currency: 'usd',
+    stripeSessionId: 'cs_test_123',
+    transactionId: 'txn_test_123',
+    paymentStatus: 'paid',
+    paidAt: new Date('2026-02-02T00:00:00.000Z'),
+    createdAt: new Date('2026-02-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-02-02T00:00:00.000Z'),
+    passwordHash: 'secret-password-hash',
+    tokens: ['secret-session-token'],
+    stripeAccountId: 'acct_secret',
+    stripeWebhookSecret: 'whsec_secret'
+  };
+  const calls = [];
+  const collection = {
+    async findOne(filter, options) {
+      calls.push({ filter, options });
+
+      return Object.entries(options.projection).reduce((result, [key, include]) => {
+        if (include === 1 && key in storedPayment) {
+          result[key] = storedPayment[key];
+        }
+        return result;
+      }, {});
+    }
+  };
+  const repository = makeRepo(PaymentRepository, collection);
+
+  const payment = await repository.findByStripeSessionId('cs_test_123');
+
+  assert.equal(payment.serviceTitle, 'Phone screen repair');
+  assert.equal(payment.stripeSessionId, 'cs_test_123');
+  assert.equal(payment.passwordHash, undefined);
+  assert.equal(payment.tokens, undefined);
+  assert.equal(payment.stripeAccountId, undefined);
+  assert.equal(payment.stripeWebhookSecret, undefined);
+  assert.equal(calls[0].options.projection.serviceTitle, 1);
+  assert.equal(calls[0].options.projection.passwordHash, undefined);
+
+  await repository.findByBookingId(objectId.toHexString());
+  assert.equal(calls[1].options.projection.serviceTitle, 1);
 });
 
 test('remaining list methods apply their documented filters', async () => {
@@ -536,6 +705,10 @@ test('remaining list methods apply their documented filters', async () => {
 
   assert.equal(customerCollection.calls[0].filter.customerEmail, 'customer@example.com');
   assert.equal(customerCollection.calls[0].filter.status, 'requested');
+  assert.deepEqual(
+    customerCollection.calls[0].options.collation,
+    CASE_INSENSITIVE_EMAIL_COLLATION
+  );
 
   const allCollection = makeCollection({ total: 1 });
   const allRepository = makeRepo(BookingRepository, allCollection);
