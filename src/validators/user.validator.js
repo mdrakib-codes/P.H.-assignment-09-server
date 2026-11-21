@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import {
   emailSchema,
@@ -13,6 +14,16 @@ export const PUBLIC_ROLES = Object.freeze(['customer', 'technician']);
 
 export const publicRoleSchema = z.enum(PUBLIC_ROLES).catch('customer');
 export const userRoleSchema = z.enum(USER_ROLES);
+export const actorIdSchema = z.union([
+  z.instanceof(ObjectId),
+  z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid actor id.')
+]);
+export const verifiedActorSchema = z.object({
+  id: actorIdSchema,
+  email: emailSchema,
+  role: userRoleSchema,
+  name: requiredString('Actor name')
+});
 
 export const userSchema = z.object({
   _id: objectIdSchema.optional(),
@@ -34,5 +45,13 @@ export const userUpdateSchema = z
     phone: z.string().trim().optional(),
     area: z.string().trim().optional(),
     bio: z.string().trim().optional()
+  })
+  .strict();
+
+export const userProfileUpdateSchema = userUpdateSchema;
+
+export const userRoleUpdateSchema = z
+  .object({
+    role: userRoleSchema
   })
   .strict();

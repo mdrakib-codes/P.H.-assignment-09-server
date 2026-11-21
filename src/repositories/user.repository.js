@@ -6,31 +6,39 @@ import {
   userSchema,
   userUpdateSchema
 } from '../validators/index.js';
+import { toIncludeProjection } from '../utils/projections.js';
 import { BaseRepository } from './base.repository.js';
 
-const SAFE_USER_PROJECTION = Object.freeze({
-  passwordHash: 0,
-  password: 0,
-  hashedPassword: 0,
-  tokens: 0,
-  sessions: 0,
-  resetToken: 0,
-  verificationToken: 0
-});
+export const CANONICAL_ACTOR_FIELDS = Object.freeze(['name', 'email', 'role']);
+export const USER_PROFILE_FIELDS = Object.freeze([
+  '_id',
+  'name',
+  'email',
+  'image',
+  'role',
+  'phone',
+  'area',
+  'bio',
+  'createdAt',
+  'updatedAt'
+]);
+export const ADMIN_USER_FIELDS = USER_PROFILE_FIELDS;
+export const PUBLIC_TECHNICIAN_FIELDS = Object.freeze(['name', 'image', 'area', 'bio']);
 
+const CANONICAL_ACTOR_PROJECTION = Object.freeze(
+  toIncludeProjection(CANONICAL_ACTOR_FIELDS)
+);
+const ADMIN_USER_PROJECTION = Object.freeze(toIncludeProjection(ADMIN_USER_FIELDS));
 const PUBLIC_TECHNICIAN_PROJECTION = Object.freeze({
   _id: 0,
-  name: 1,
-  image: 1,
-  area: 1,
-  bio: 1
+  ...toIncludeProjection(PUBLIC_TECHNICIAN_FIELDS, { includeId: false })
 });
 
 export class UserRepository extends BaseRepository {
   constructor(options) {
     super('users', {
       entityName: 'User',
-      projection: SAFE_USER_PROJECTION,
+      projection: ADMIN_USER_PROJECTION,
       immutableFields: ['email', 'role'],
       ...options
     });
@@ -44,15 +52,19 @@ export class UserRepository extends BaseRepository {
     );
   }
 
-  async findByEmail(email) {
+  async findCanonicalActorByEmail(email) {
     const normalizedEmail = this.normalizeEmail(email);
 
     return this.execute((collection) =>
       collection.findOne(
         { email: normalizedEmail },
-        { projection: this.projection }
+        { projection: CANONICAL_ACTOR_PROJECTION }
       )
     );
+  }
+
+  async findByEmail(email) {
+    return this.findCanonicalActorByEmail(email);
   }
 
   async findPublicTechnicianByEmail(email) {
