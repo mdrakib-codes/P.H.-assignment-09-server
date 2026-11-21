@@ -1,3 +1,6 @@
+import { ACTIVE_BOOKING_STATUSES } from '../validators/index.js';
+import { CASE_INSENSITIVE_EMAIL_COLLATION } from './collations.js';
+
 export const INDEX_DEFINITIONS = Object.freeze({
   users: [
     { name: 'user_email_uidx', key: { email: 1 }, unique: true },
@@ -26,6 +29,15 @@ export const INDEX_DEFINITIONS = Object.freeze({
     {
       name: 'bookings_service_active_idx',
       key: { serviceId: 1, customerEmail: 1, status: 1 }
+    },
+    {
+      name: 'bookings_active_customer_service_uidx',
+      key: { customerEmail: 1, serviceId: 1 },
+      unique: true,
+      partialFilterExpression: {
+        status: { $in: [...ACTIVE_BOOKING_STATUSES] }
+      },
+      collation: CASE_INSENSITIVE_EMAIL_COLLATION
     },
     { name: 'bookings_status_payment_idx', key: { status: 1, paymentStatus: 1 } },
     { name: 'bookings_created_at_idx', key: { createdAt: -1 } }
